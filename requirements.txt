@@ -2,3 +2,4 @@ streamlit
 pandas
 thetadata
 python-dotenv
+matplotlib
