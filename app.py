@@ -47,6 +47,13 @@ def get_expirations(client, symbol):
     return future if future else parsed
 
 
+def format_numeric_date(d):
+    """يحول التاريخ إلى صيغة يوم-شهر-سنة بالأرقام، مثال: 9-9-2026"""
+    if hasattr(d, "day"):
+        return f"{d.day}-{d.month}-{d.year}"
+    return str(d)
+
+
 def build_chain(client, symbol, expiration, strike_range=15):
     exp_str = expiration.strftime("%Y-%m-%d") if hasattr(expiration, "strftime") else str(expiration)
     quotes = client.option_snapshot_quote(
@@ -64,25 +71,12 @@ def build_chain(client, symbol, expiration, strike_range=15):
         )
     except Exception:
         ohlc = None
-    try:
-        greeks = client.option_snapshot_greeks_all(
-            symbol=symbol, expiration=exp_str, strike="*", right="both", strike_range=strike_range,
-        )
-    except Exception:
-        greeks = None
 
     volume_map = {}
     if ohlc is not None and len(ohlc) > 0:
         for _, r in ohlc.iterrows():
             key = (round(float(r["strike"]), 2), str(r["right"]).lower()[0])
             volume_map[key] = int(r.get("volume", 0) or 0)
-
-    delta_map = {}
-    if greeks is not None and len(greeks) > 0:
-        for _, r in greeks.iterrows():
-            key = (round(float(r["strike"]), 2), str(r["right"]).lower()[0])
-            d = r.get("delta")
-            delta_map[key] = float(d) if d is not None else None
 
     if quotes is None or len(quotes) == 0:
         return None
@@ -101,21 +95,9 @@ def build_chain(client, symbol, expiration, strike_range=15):
             "bid": r.get("bid"), "ask": r.get("ask"),
             "oi": oi_map.get((strike, right[0]), 0),
             "volume": volume_map.get((strike, right[0]), 0),
-            "delta": delta_map.get((strike, right[0])),
         }
     strikes = sorted(set(list(calls.keys()) + list(puts.keys())))
     return strikes, calls, puts
-
-
-def format_arabic_date(d):
-    """يحول التاريخ إلى صيغة يوم-شهر-سنة بالميلادي"""
-    months = {
-        1: "يناير", 2: "فبراير", 3: "مارس", 4: "أبريل", 5: "مايو", 6: "يونيو",
-        7: "يوليو", 8: "أغسطس", 9: "سبتمبر", 10: "أكتوبر", 11: "نوفمبر", 12: "ديسمبر",
-    }
-    if hasattr(d, "day"):
-        return f"{d.day} {months.get(d.month, d.month)} {d.year}"
-    return str(d)
 
 
 def rank_contracts(client, symbol, right, max_price=300, min_price=5, top_n=4):
@@ -123,7 +105,6 @@ def rank_contracts(client, symbol, right, max_price=300, min_price=5, top_n=4):
     يرجّع أفضل top_n عقود مرتبة حسب:
     1. السعر ما يتجاوز max_price (بالدولار للعقد الواحد)
     2. أعلى سيولة (Volume) وأضيق سبريد
-    3. من بينهم، أقوى Delta (يتفاعل أكثر مع حركة السهم)
     """
     expirations = get_expirations(client, symbol)
     if not expirations:
@@ -141,7 +122,6 @@ def rank_contracts(client, symbol, right, max_price=300, min_price=5, top_n=4):
         ask = data.get("ask")
         bid = data.get("bid")
         volume = data.get("volume") or 0
-        delta = data.get("delta")
         if ask is None or bid is None or ask <= 0:
             continue
         contract_price = ask * 100
@@ -151,8 +131,8 @@ def rank_contracts(client, symbol, right, max_price=300, min_price=5, top_n=4):
         spread_pct = (spread / ask) if ask > 0 else 1
         liquidity_score = volume / (spread_pct + 0.01)
         candidates.append({
-            "Strike": k, "Ask": ask, "Bid": bid, "Volume": volume,
-            "Delta": delta, "السعر": round(contract_price, 2),
+            "Strike": k, "Volume": volume,
+            "السعر": round(contract_price, 2),
             "liquidity_score": liquidity_score, "expiration": expiration,
         })
 
@@ -160,30 +140,19 @@ def rank_contracts(client, symbol, right, max_price=300, min_price=5, top_n=4):
         return []
 
     cand_df = pd.DataFrame(candidates).sort_values("liquidity_score", ascending=False)
-    top_pool = cand_df.head(top_n * 2)
-
-    if top_pool["Delta"].notna().any():
-        top_pool = top_pool.reindex(
-            top_pool["Delta"].abs().sort_values(ascending=False).index
-        )
-
-    return top_pool.head(top_n).to_dict("records")
+    return cand_df.head(top_n).to_dict("records")
 
 
-def render_contract_cards(contracts, right_label):
+def render_contract_rows(contracts):
     if not contracts:
-        st.warning("ما فيه عقود مناسبة حالياً ضمن معايير السعر والسيولة")
+        st.caption("ما فيه عقود مناسبة ضمن معايير السعر والسيولة")
         return
     for i, c in enumerate(contracts, start=1):
-        delta_txt = f"{c['Delta']:.2f}" if c["Delta"] is not None else "غير متاح"
-        exp_txt = format_arabic_date(c["expiration"])
-        with st.container(border=True):
-            st.markdown(f"**#{i} — Strike {c['Strike']:.2f}**")
-            st.caption(f"تاريخ الانتهاء: {exp_txt}")
-            m1, m2, m3 = st.columns(3)
-            m1.metric("سعر العقد", f"${c['السعر']:.2f}")
-            m2.metric("السيولة (Volume)", f"{int(c['Volume']):,}")
-            m3.metric("Delta", delta_txt)
+        row = st.columns([1, 2, 2, 2])
+        row[0].markdown(f"**#{i}**")
+        row[1].markdown(f"Strike **{c['Strike']:.2f}**")
+        row[2].markdown(f"${c['السعر']:.2f}")
+        row[3].markdown(f"سيولة {int(c['Volume']):,}")
 
 
 # ----------------------------------------------------------------------
@@ -194,7 +163,7 @@ if "client" not in st.session_state:
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
 
-st.title("💧 أداة السيولة - عقود وأسهم")
+st.title("💧 أداة السيولة")
 
 if st.session_state.client is None:
     st.subheader("تسجيل الدخول (Theta Data)")
@@ -217,10 +186,8 @@ else:
 
     col1, col2 = st.columns([3, 1])
     with col1:
-        new_symbol = st.text_input("اكتب اسم السهم أو المؤشر", placeholder="مثال: AAPL")
+        new_symbol = st.text_input("اكتب اسم السهم أو المؤشر", placeholder="مثال: AAPL", label_visibility="collapsed")
     with col2:
-        st.write("")
-        st.write("")
         add_clicked = st.button("+ إضافة", use_container_width=True)
 
     if add_clicked and new_symbol.strip():
@@ -229,33 +196,34 @@ else:
             st.session_state.watchlist.append(sym)
 
     if st.session_state.watchlist:
-        st.markdown("---")
-        cols = st.columns([5, 1])
-        with cols[1]:
-            if st.button("🔄 تحديث الكل"):
-                st.rerun()
+        if st.button("🔄 تحديث الكل"):
+            st.rerun()
 
         for sym in st.session_state.watchlist:
             with st.container(border=True):
-                top_row = st.columns([4, 1])
+                top_row = st.columns([5, 1])
                 with top_row[0]:
-                    st.subheader(sym)
+                    st.markdown(f"### {sym}")
                 with top_row[1]:
-                    if st.button("🗑 حذف", key=f"del_{sym}"):
+                    if st.button("🗑", key=f"del_{sym}"):
                         st.session_state.watchlist.remove(sym)
                         st.rerun()
 
-                with st.spinner(f"جاري تحليل أفضل العقود لـ {sym} ..."):
+                with st.spinner("جاري التحليل..."):
                     call_contracts = rank_contracts(client, sym, "CALL")
                     put_contracts = rank_contracts(client, sym, "PUT")
 
+                if call_contracts:
+                    exp_txt = format_numeric_date(call_contracts[0]["expiration"])
+                    st.caption(f"ينتهي: {exp_txt}")
+
                 call_col, put_col = st.columns(2)
                 with call_col:
-                    st.markdown("### CALL 🟢")
-                    render_contract_cards(call_contracts, "CALL")
+                    st.markdown("🟢 **CALL**")
+                    render_contract_rows(call_contracts)
                 with put_col:
-                    st.markdown("### PUT 🔴")
-                    render_contract_cards(put_contracts, "PUT")
+                    st.markdown("🔴 **PUT**")
+                    render_contract_rows(put_contracts)
     else:
         st.info("لسا ما أضفت أي شركة. اكتب رمز السهم فوق واضغط + إضافة.")
 
