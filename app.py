@@ -4,10 +4,9 @@ from datetime import date
 
 st.set_page_config(page_title="أداة السيولة", page_icon="💧", layout="wide")
 
-
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # دوال أساسية
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 def get_spot_price(client, symbol):
     try:
         df = client.stock_snapshot_quote(symbol=[symbol])
@@ -59,6 +58,17 @@ def build_chain(client, symbol, expiration, strike_range=15):
         )
     except Exception:
         oi = None
+    try:
+        ohlc = client.option_snapshot_ohlc(
+            symbol=symbol, expiration=exp_str, strike="*", right="both", strike_range=strike_range,
+        )
+    except Exception:
+        ohlc = None
+    volume_map = {}
+    if ohlc is not None and len(ohlc) > 0:
+        for _, r in ohlc.iterrows():
+            key = (round(float(r["strike"]), 2), str(r["right"]).lower()[0])
+            volume_map[key] = int(r.get("volume", 0) or 0)
     if quotes is None or len(quotes) == 0:
         return None
     oi_map = {}
@@ -74,6 +84,7 @@ def build_chain(client, symbol, expiration, strike_range=15):
         bucket[strike] = {
             "bid": r.get("bid"), "ask": r.get("ask"),
             "oi": oi_map.get((strike, right[0]), 0),
+            "volume": volume_map.get((strike, right[0]), 0),
         }
     strikes = sorted(set(list(calls.keys()) + list(puts.keys())))
     return strikes, calls, puts
@@ -94,23 +105,23 @@ def get_symbol_table(client, symbol, top_n=8):
     for k in strikes:
         c = calls.get(k, {})
         p = puts.get(k, {})
-        rows.append({"Strike": k, "النوع": "CALL", "OI": c.get("oi") or 0, "Bid": c.get("bid"), "Ask": c.get("ask")})
-        rows.append({"Strike": k, "النوع": "PUT", "OI": p.get("oi") or 0, "Bid": p.get("bid"), "Ask": p.get("ask")})
+        rows.append({"Strike": k, "النوع": "CALL", "OI": c.get("oi") or 0, "Volume": c.get("volume") or 0, "Bid": c.get("bid"), "Ask": c.get("ask")})
+        rows.append({"Strike": k, "النوع": "PUT", "OI": p.get("oi") or 0, "Volume": p.get("volume") or 0, "Bid": p.get("bid"), "Ask": p.get("ask")})
 
     df = pd.DataFrame(rows).sort_values("OI", ascending=False).head(top_n).reset_index(drop=True)
     df.index = df.index + 1
     return spot, expiration, df
 
 
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 # تسجيل الدخول
-# ---------------------------------------------------------------------------
+# ----------------------------------------------------------------------
 if "client" not in st.session_state:
     st.session_state.client = None
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
 
-st.title("💧 أداة السيولة — عقود وأسهم")
+st.title("💧 أداة السيولة - عقود وأسهم")
 
 if st.session_state.client is None:
     st.subheader("تسجيل الدخول (Theta Data)")
@@ -119,16 +130,15 @@ if st.session_state.client is None:
         password = st.text_input("كلمة المرور", type="password")
         submitted = st.form_submit_button("تسجيل الدخول")
 
-    if submitted:
-        try:
-            from thetadata import ThetaClient
-            client = ThetaClient(email=email, password=password, dataframe_type="pandas")
-            st.session_state.client = client
-            st.success("تم تسجيل الدخول بنجاح")
-            st.rerun()
-        except Exception as e:
-            st.error(f"فشل تسجيل الدخول: {e}")
-
+        if submitted:
+            try:
+                from thetadata import ThetaClient
+                client = ThetaClient(email=email, password=password, dataframe_type="pandas")
+                st.session_state.client = client
+                st.success("تم تسجيل الدخول بنجاح")
+                st.rerun()
+            except Exception as e:
+                st.error(f"فشل تسجيل الدخول: {e}")
 else:
     client = st.session_state.client
 
@@ -138,7 +148,7 @@ else:
     with col2:
         st.write("")
         st.write("")
-        add_clicked = st.button("➕ إضافة", use_container_width=True)
+        add_clicked = st.button("+ إضافة", use_container_width=True)
 
     if add_clicked and new_symbol.strip():
         sym = new_symbol.strip().upper()
@@ -158,7 +168,7 @@ else:
                 with top_row[0]:
                     st.subheader(sym)
                 with top_row[1]:
-                    if st.button("🗑️ حذف", key=f"del_{sym}"):
+                    if st.button("🗑 حذف", key=f"del_{sym}"):
                         st.session_state.watchlist.remove(sym)
                         st.rerun()
 
@@ -172,15 +182,16 @@ else:
                     st.warning("ما فيه بيانات متاحة الحين (السوق مسكر)")
                     continue
 
-                spot_txt = f"{spot:,.2f}" if spot else "غير متاح"
-                st.caption(f"السعر الحالي: **{spot_txt}**  |  تاريخ الانتهاء: **{expiration}**")
+                spot_txt = f"{spot:.2f}" if spot else "غير متاح"
+                st.caption(f"**تاريخ الانتهاء:** {expiration}  |  **السعر الحالي:** {spot_txt}")
 
                 st.dataframe(
-                    df.style.background_gradient(subset=["OI"], cmap="Greens"),
+                    df.style.background_gradient(subset=["OI"], cmap="Greens")
+                             .format({"Strike": "{:.2f}", "Bid": "{:.2f}", "Ask": "{:.2f}"}),
                     use_container_width=True,
                 )
     else:
-        st.info("لسا ما أضفت أي شركة. اكتب رمز السهم فوق واضغط '➕ إضافة'.")
+        st.info("لسا ما أضفت أي شركة. اكتب رمز السهم فوق واضغط + إضافة.")
 
     st.markdown("---")
     if st.button("تسجيل خروج"):
