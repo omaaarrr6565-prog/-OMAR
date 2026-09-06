@@ -217,10 +217,15 @@ else:
                     exp_txt = format_numeric_date(call_contracts[0]["expiration"])
                     st.caption(f"ينتهي: {exp_txt}")
 
-                call_col, put_col = st.columns(2)
+                call_col, divider_col, put_col = st.columns([10, 1, 10])
                 with call_col:
                     st.markdown("🟢 **CALL**")
                     render_contract_rows(call_contracts)
+                with divider_col:
+                    st.markdown(
+                        "<div style='border-left: 2px solid #444; height: 100%; margin: 0 auto;'></div>",
+                        unsafe_allow_html=True,
+                    )
                 with put_col:
                     st.markdown("🔴 **PUT**")
                     render_contract_rows(put_contracts)
