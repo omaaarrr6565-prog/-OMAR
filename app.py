@@ -47,13 +47,6 @@ def get_expirations(client, symbol):
     return future if future else parsed
 
 
-def format_numeric_date(d):
-    """يحول التاريخ إلى صيغة يوم-شهر-سنة بالأرقام، مثال: 9-9-2026"""
-    if hasattr(d, "day"):
-        return f"{d.day}-{d.month}-{d.year}"
-    return str(d)
-
-
 def build_chain(client, symbol, expiration, strike_range=15):
     exp_str = expiration.strftime("%Y-%m-%d") if hasattr(expiration, "strftime") else str(expiration)
     quotes = client.option_snapshot_quote(
@@ -100,23 +93,26 @@ def build_chain(client, symbol, expiration, strike_range=15):
     return strikes, calls, puts
 
 
-def rank_contracts(client, symbol, right, max_price=300, min_price=5, top_n=4):
+def get_chain_with_fallback(client, symbol, max_tries=3):
     """
-    يرجّع أفضل top_n عقود مرتبة حسب:
-    1. السعر ما يتجاوز max_price (بالدولار للعقد الواحد)
-    2. أعلى سيولة (Volume) وأضيق سبريد
+    يجرب أقرب تاريخ انتهاء، ولو فشل (ما فيه بيانات)،
+    يجرب التاريخ اللي بعده تلقائياً، لين يلقى بيانات أو يوصل حد المحاولات.
     """
     expirations = get_expirations(client, symbol)
     if not expirations:
-        return []
-    expiration = expirations[0]
-    result = build_chain(client, symbol, expiration)
-    if result is None:
-        return []
+        return None, None
+    for expiration in expirations[:max_tries]:
+        try:
+            result = build_chain(client, symbol, expiration)
+        except Exception:
+            result = None
+        if result is not None:
+            return expiration, result
+    return None, None
 
-    strikes, calls, puts = result
-    bucket = calls if right == "CALL" else puts
 
+def rank_from_bucket(bucket, max_price=300, min_price=5, top_n=4):
+    """يرتّب عقود جهة واحدة (calls أو puts) حسب السيولة والسعر"""
     candidates = []
     for k, data in bucket.items():
         ask = data.get("ask")
@@ -133,14 +129,19 @@ def rank_contracts(client, symbol, right, max_price=300, min_price=5, top_n=4):
         candidates.append({
             "Strike": k, "Volume": volume,
             "السعر": round(contract_price, 2),
-            "liquidity_score": liquidity_score, "expiration": expiration,
+            "liquidity_score": liquidity_score,
         })
-
     if not candidates:
         return []
-
     cand_df = pd.DataFrame(candidates).sort_values("liquidity_score", ascending=False)
     return cand_df.head(top_n).to_dict("records")
+
+
+def format_numeric_date(d):
+    """يحول التاريخ إلى صيغة يوم-شهر-سنة بالأرقام، مثال: 9-9-2026"""
+    if hasattr(d, "day"):
+        return f"{d.day}-{d.month}-{d.year}"
+    return str(d)
 
 
 def render_contract_rows(contracts):
@@ -210,25 +211,26 @@ else:
                         st.rerun()
 
                 with st.spinner("جاري التحليل..."):
-                    call_contracts = rank_contracts(client, sym, "CALL")
-                    put_contracts = rank_contracts(client, sym, "PUT")
+                    expiration, result = get_chain_with_fallback(client, sym)
 
-                if call_contracts:
-                    exp_txt = format_numeric_date(call_contracts[0]["expiration"])
-                    st.caption(f"ينتهي: {exp_txt}")
+                if result is None:
+                    st.warning("ما فيه بيانات متاحة حالياً لهذا الرمز")
+                else:
+                    strikes, calls, puts = result
+                    call_contracts = rank_from_bucket(calls)
+                    put_contracts = rank_from_bucket(puts)
 
-                call_col, divider_col, put_col = st.columns([10, 1, 10])
-                with call_col:
-                    st.markdown("🟢 **CALL**")
-                    render_contract_rows(call_contracts)
-                with divider_col:
-                    st.markdown(
-                        "<div style='border-left: 2px solid #444; height: 100%; margin: 0 auto;'></div>",
-                        unsafe_allow_html=True,
-                    )
-                with put_col:
-                    st.markdown("🔴 **PUT**")
-                    render_contract_rows(put_contracts)
+                    st.caption(f"ينتهي: {format_numeric_date(expiration)}")
+
+                    call_col, put_col = st.columns(2)
+                    with call_col:
+                        with st.container(border=True):
+                            st.markdown("🟢 **CALL**")
+                            render_contract_rows(call_contracts)
+                    with put_col:
+                        with st.container(border=True):
+                            st.markdown("🔴 **PUT**")
+                            render_contract_rows(put_contracts)
     else:
         st.info("لسا ما أضفت أي شركة. اكتب رمز السهم فوق واضغط + إضافة.")
 
