@@ -1,11 +1,36 @@
 import streamlit as st
 import pandas as pd
+import json
+import os
 from datetime import date
+
+WATCHLIST_FILE = "watchlist.json"
+
+
+def load_watchlist():
+‎    """يقرأ قائمة الشركات المحفوظة من ملف، أو يرجع قائمة فاضية لو الملف مو موجود"""
+    if os.path.exists(WATCHLIST_FILE):
+        try:
+            with open(WATCHLIST_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return []
+    return []
+
+
+def save_watchlist(watchlist):
+‎    """يحفظ قائمة الشركات بملف عشان تضل موجودة حتى بعد إعادة تشغيل الموقع"""
+    try:
+        with open(WATCHLIST_FILE, "w", encoding="utf-8") as f:
+            json.dump(watchlist, f, ensure_ascii=False)
+    except Exception:
+        pass
+
 
 st.set_page_config(page_title="أداة السيولة", page_icon="💧", layout="wide")
 
 # ----------------------------------------------------------------------
-# دوال أساسية
+‎# دوال أساسية
 # ----------------------------------------------------------------------
 def get_spot_price(client, symbol):
     try:
@@ -95,8 +120,8 @@ def build_chain(client, symbol, expiration, strike_range=15):
 
 def get_chain_with_fallback(client, symbol, max_tries=3):
     """
-    يجرب أقرب تاريخ انتهاء، ولو فشل (ما فيه بيانات)،
-    يجرب التاريخ اللي بعده تلقائياً، لين يلقى بيانات أو يوصل حد المحاولات.
+‎    يجرب أقرب تاريخ انتهاء، ولو فشل (ما فيه بيانات)،
+‎    يجرب التاريخ اللي بعده تلقائياً، لين يلقى بيانات أو يوصل حد المحاولات.
     """
     expirations = get_expirations(client, symbol)
     if not expirations:
@@ -112,7 +137,7 @@ def get_chain_with_fallback(client, symbol, max_tries=3):
 
 
 def rank_from_bucket(bucket, max_price=300, min_price=5, top_n=4):
-    """يرتّب عقود جهة واحدة (calls أو puts) حسب السيولة والسعر"""
+‎    """يرتّب عقود جهة واحدة (calls أو puts) حسب السيولة والسعر"""
     candidates = []
     for k, data in bucket.items():
         ask = data.get("ask")
@@ -127,8 +152,8 @@ def rank_from_bucket(bucket, max_price=300, min_price=5, top_n=4):
         spread_pct = (spread / ask) if ask > 0 else 1
         liquidity_score = volume / (spread_pct + 0.01)
         candidates.append({
-            "Strike": k, "Volume": volume,
-            "السعر": round(contract_price, 2),
+            "Strike": k, "Volume": volume, "OI": data.get("oi") or 0,
+‎            "السعر": round(contract_price, 2),
             "liquidity_score": liquidity_score,
         })
     if not candidates:
@@ -138,7 +163,7 @@ def rank_from_bucket(bucket, max_price=300, min_price=5, top_n=4):
 
 
 def format_numeric_date(d):
-    """يحول التاريخ إلى صيغة يوم-شهر-سنة بالأرقام، مثال: 9-9-2026"""
+‎    """يحول التاريخ إلى صيغة يوم-شهر-سنة بالأرقام، مثال: 9-9-2026"""
     if hasattr(d, "day"):
         return f"{d.day}-{d.month}-{d.year}"
     return str(d)
@@ -149,20 +174,21 @@ def render_contract_rows(contracts):
         st.caption("ما فيه عقود مناسبة ضمن معايير السعر والسيولة")
         return
     for i, c in enumerate(contracts, start=1):
-        row = st.columns([1, 2, 2, 2])
+        row = st.columns([1, 2, 2, 2, 2])
         row[0].markdown(f"**#{i}**")
         row[1].markdown(f"Strike **{c['Strike']:.2f}**")
         row[2].markdown(f"${c['السعر']:.2f}")
-        row[3].markdown(f"سيولة {int(c['Volume']):,}")
+        row[3].markdown(f"تداول اليوم {int(c['Volume']):,}")
+        row[4].markdown(f"**إجمالي مملوك {int(c['OI']):,}**")
 
 
 # ----------------------------------------------------------------------
-# تسجيل الدخول
+‎# تسجيل الدخول
 # ----------------------------------------------------------------------
 if "client" not in st.session_state:
     st.session_state.client = None
 if "watchlist" not in st.session_state:
-    st.session_state.watchlist = []
+    st.session_state.watchlist = load_watchlist()
 
 st.title("💧 أداة السيولة")
 
@@ -195,46 +221,4 @@ else:
         sym = new_symbol.strip().upper()
         if sym not in st.session_state.watchlist:
             st.session_state.watchlist.append(sym)
-
-    if st.session_state.watchlist:
-        if st.button("🔄 تحديث الكل"):
-            st.rerun()
-
-        for sym in st.session_state.watchlist:
-            with st.container(border=True):
-                top_row = st.columns([5, 1])
-                with top_row[0]:
-                    st.markdown(f"### {sym}")
-                with top_row[1]:
-                    if st.button("🗑", key=f"del_{sym}"):
-                        st.session_state.watchlist.remove(sym)
-                        st.rerun()
-
-                with st.spinner("جاري التحليل..."):
-                    expiration, result = get_chain_with_fallback(client, sym)
-
-                if result is None:
-                    st.warning("ما فيه بيانات متاحة حالياً لهذا الرمز")
-                else:
-                    strikes, calls, puts = result
-                    call_contracts = rank_from_bucket(calls)
-                    put_contracts = rank_from_bucket(puts)
-
-                    st.caption(f"ينتهي: {format_numeric_date(expiration)}")
-
-                    call_col, put_col = st.columns(2)
-                    with call_col:
-                        with st.container(border=True):
-                            st.markdown("🟢 **CALL**")
-                            render_contract_rows(call_contracts)
-                    with put_col:
-                        with st.container(border=True):
-                            st.markdown("🔴 **PUT**")
-                            render_contract_rows(put_contracts)
-    else:
-        st.info("لسا ما أضفت أي شركة. اكتب رمز السهم فوق واضغط + إضافة.")
-
-    st.markdown("---")
-    if st.button("تسجيل خروج"):
-        st.session_state.client = None
-        st.rerun()
+            save_watchlist(st.se
